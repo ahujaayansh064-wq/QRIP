@@ -1,0 +1,16 @@
+# Runtime data: the SQLite database, uploads and the local token-signing key.
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# A separate project that happens to live in this folder. Delete this line if
+# you want it deployed alongside QRIP.
+curtain-marketplace/

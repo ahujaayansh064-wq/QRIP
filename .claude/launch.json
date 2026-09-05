@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "qrip",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["backend/server.py", "--port", "8000", "--demo"],
+      "port": 8000
+    },
+    {
+      "name": "curtain-home",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8123", "--directory", "curtain-marketplace"],
+      "port": 8123
+    }
+  ]
+}

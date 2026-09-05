@@ -1,0 +1,58 @@
+# Render blueprint: the whole app (API + frontend) as one service.
+# Deploy: push this repo to GitHub, then Render dashboard > New > Blueprint.
+services:
+  - type: web
+    name: qrip
+    runtime: python
+    plan: free
+    # Nothing to install — the app is standard library only.
+    buildCommand: "python --version"
+    startCommand: "python backend/server.py"
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      # Signs auth tokens. Without it a key file is used, which is lost on every
+      # deploy, signing everyone out.
+      - key: QRIP_SECRET
+        generateValue: true
+
+      # ---------------------------------------------------------------------
+      # DATA PERSISTENCE — READ THIS
+      #
+      # Render's free plan cannot mount a disk, so on `plan: free` the SQLite
+      # database lives on the container's ephemeral filesystem and is WIPED on
+      # every deploy and every restart (including the daily free-tier restart).
+      # Fine for a demo; not fine for real projects.
+      #
+      # To keep data, upgrade the instance and uncomment BOTH blocks below:
+      #   1. change `plan: free` above to `plan: starter`
+      #   2. uncomment the QRIP_DATA_DIR variable
+      #   3. uncomment the `disk:` block at the bottom
+      # ---------------------------------------------------------------------
+      # - key: QRIP_DATA_DIR
+      #   value: /var/qrip
+
+      # Only needed if the frontend is hosted somewhere else (e.g. Netlify)
+      # AND you are not proxying /api through it.
+      # - key: QRIP_ALLOWED_ORIGINS
+      #   value: https://your-site.netlify.app
+
+      # Optional review providers for Google Maps URLs:
+      # - key: GOOGLE_MAPS_API_KEY
+      #   sync: false
+      # - key: SERPAPI_KEY
+      #   sync: false
+      # - key: OUTSCRAPER_KEY
+      #   sync: false
+
+      # Optional: Claude for the interpretive layer. Also change buildCommand
+      # above to "pip install anthropic".
+      # - key: ANTHROPIC_API_KEY
+      #   sync: false
+
+    # Paid instances only — see the note above.
+    # disk:
+    #   name: qrip-data
+    #   mountPath: /var/qrip
+    #   sizeGB: 1
