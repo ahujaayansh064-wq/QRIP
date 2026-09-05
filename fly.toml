@@ -1,0 +1,46 @@
+# Fly.io deployment. Uses the Dockerfile in this repo.
+#
+#   fly launch --no-deploy --copy-config   (creates the app, keeps this file)
+#   fly volumes create qrip_data --size 1
+#   fly secrets set QRIP_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
+#   fly deploy
+#
+# Unlike a free Render instance, the volume below means your database survives
+# deploys and restarts.
+
+app = "qrip"
+primary_region = "lhr"          # change to your nearest: iad, ams, sin, syd...
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8000"
+  QRIP_DATA_DIR = "/data"
+
+[[mounts]]
+  source = "qrip_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Scale to zero when idle to keep costs at nothing; the next request wakes it
+  # in a few seconds (much faster than a cold Render free instance).
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.http_options.response]
+    pristine = true             # don't let the proxy rewrite our headers
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/api/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

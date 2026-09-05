@@ -17,6 +17,72 @@ and ES modules with no build step. So you have two sensible options.
 
 ---
 
+## Which free hosts actually work
+
+QRIP needs a **process that stays alive**: analysis runs on a background thread
+while the browser polls for progress, and state lives in a SQLite file. Anything
+serverless (Netlify, Vercel, Cloudflare Workers, Deno Deploy, AWS Lambda) fails
+on both counts — the function ends when it returns, and the filesystem is
+per-invocation.
+
+That leaves these. Free-tier terms change constantly, so check current pricing
+before committing to one.
+
+| Host | Free? | Data survives redeploy? | Notes |
+|---|---|---|---|
+| **Render** | Yes | **No** (disks are paid) | Easiest. Sleeps after ~15 min, ~50 s cold start. `render.yaml` included. |
+| **Fly.io** | Small always-free allowance, card required | **Yes** — free 3 GB volume | Best free option that keeps data. Scales to zero, wakes in seconds. `fly.toml` included. |
+| **Hugging Face Spaces** | Yes, genuinely | No (ephemeral unless you pay for storage) | Docker Space, uses this repo's `Dockerfile`. Sleeps when idle. Odd home for a business tool but it works. |
+| **Koyeb** | One free web service | No | Deploys from the Dockerfile. |
+| **Oracle Cloud Always Free** | Yes, permanently | **Yes** — a real disk | A real VM (generous ARM allowance). Nothing sleeps, nothing resets. You manage the box: systemd unit + Caddy for TLS. Most work, best result. |
+| **Your own machine + Cloudflare Tunnel** | Yes | Yes (it's your disk) | `cloudflared tunnel --url http://localhost:8000` gives a public HTTPS URL in seconds. Only up while your PC is on — good for showing someone today. |
+
+### Fly.io, step by step
+
+Install [flyctl](https://fly.io/docs/flyctl/install/), then from this folder:
+
+```bash
+fly launch --no-deploy --copy-config
+```
+
+```bash
+fly volumes create qrip_data --size 1
+```
+
+```bash
+fly secrets set QRIP_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
+```
+
+```bash
+fly deploy
+```
+
+`fly.toml` already mounts the volume at `/data` and points `QRIP_DATA_DIR` there,
+so your projects survive every deploy — which the free Render tier cannot do.
+
+### Hugging Face Spaces, step by step
+
+1. [huggingface.co/new-space](https://huggingface.co/new-space) → SDK **Docker**
+   → blank template.
+2. In the Space's **Settings → Variables and secrets**, add a secret
+   `QRIP_SECRET` (any long random string).
+3. Push this repo to the Space's git remote. The Space builds the `Dockerfile`
+   as-is; add `app_port: 8000` to the Space README's frontmatter so it routes to
+   the right port.
+
+### Cloudflare Tunnel (fastest way to show someone)
+
+With QRIP already running locally on port 8000:
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+It prints a public `https://*.trycloudflare.com` URL. No account, no card, no
+deploy. It dies when you close the terminal.
+
+---
+
 ## Option A — everything on one host (simplest)
 
 One service serves both the API and the frontend, exactly as it does locally.
