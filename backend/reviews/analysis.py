@@ -17,8 +17,8 @@ from analysis import textproc as tp
 from . import lexicon as lx
 from .sources import BUCKETS, bucket_for
 
-POSITIVE_CUT = 0.12
-NEGATIVE_CUT = -0.12
+from .scoring import (  # noqa: F401  (re-exported for existing callers)
+    NEGATIVE_CUT, POSITIVE_CUT, blended_sentiment, sentiment_label)
 
 CONTROLS = {
     "similarity_threshold": 0.3,
@@ -28,27 +28,6 @@ CONTROLS = {
     "coding_granularity": "sentence",
     "contradiction_sensitivity": 0.55,
 }
-
-
-def sentiment_label(value):
-    if value >= POSITIVE_CUT:
-        return "positive"
-    if value <= NEGATIVE_CUT:
-        return "negative"
-    return "neutral"
-
-
-def blended_sentiment(text_valence, rating):
-    """Text carries the meaning; the star rating is corroboration, not truth.
-
-    Reviewers routinely leave four stars beside a paragraph of complaint, which
-    is exactly the contradiction this report is meant to surface — so the text
-    keeps the larger weight.
-    """
-    if rating is None:
-        return round(text_valence, 3)
-    star_valence = (float(rating) - 3.0) / 2.0
-    return round(0.65 * text_valence + 0.35 * star_valence, 3)
 
 
 # --- coding ---------------------------------------------------------------
@@ -503,25 +482,226 @@ def _quote(code):
 
 # --- top-level ------------------------------------------------------------
 
-def analyse(reviews, label):
-    """Run the whole pipeline for one business."""
-    codes, idf, related, concepts = code_reviews(reviews)
-    participants = len({review["reviewer_id"] for review in reviews})
-    themes, vectors = build_themes(codes, idf, related, concepts, participants)
-    summary = kpis(reviews, codes)          # also fills review sentiment fields
+def analyse(reviews, label, on_usage=None, on_stage=None):
+    """Function 1 (code) -> function 2 (reason about themes) -> analytics."""
+    from . import reasoning, thematic
+
+    def stage(name, fraction):
+        if on_stage:
+            on_stage(name, fraction)
+
+    stage("coding reviews", 0.0)
+    coded = thematic.run(reviews, label, on_usage=on_usage,
+                         on_progress=lambda f: stage("coding reviews", f))
+
+    stage("reasoning about themes", 0.0)
+    reasoned = reasoning.run(
+        coded["codes"], coded["themes"], label, len(reviews), on_usage=on_usage,
+        on_progress=lambda f: stage("sorting codes into themes", f))
+
+    codes = reasoned["codes"]
+    for code in codes:
+        # aliases the report, workbook and UI already use
+        code["theme"] = (code.get("themes") or [""])[0]
+        code["reviewer"] = code["participant"]
+        code.setdefault("alternative_interpretation", "")
+    legacy = [_legacy_view(code) for code in codes]
+    summary = kpis(reviews, legacy)         # also fills review sentiment fields
+    themes = reasoned["themes"]
+
     return {
         "label": label,
+        "engine": {"coding": coded["engine"], "reasoning": reasoned["engine"],
+                   "note": reasoned.get("note")},
         "kpis": summary,
         "temporal": temporal(reviews),
-        "themes": [_theme_out(theme) for theme in themes],
-        "codebook": [_code_out(code) for code in codes],
-        "contradictions": find_contradictions(codes, vectors, themes, reviews),
-        "content": content_counts(codes, reviews),
-        "framework": framework_matrix(codes, reviews),
-        "bottlenecks": bottlenecks(codes, themes, reviews),
-        "dimensions": dimension_scores(codes, reviews),
+        "sentiment_trend": sentiment_over_time(reviews),
+        "themes": themes,
+        "codebook": codes,
+        "contradictions": theme_contradictions(codes, themes, reviews),
+        "content": content_counts(legacy, reviews),
+        "framework": framework_matrix(legacy, reviews),
+        "bottlenecks": bottlenecks(legacy, themes, reviews),
+        "dimensions": dimension_scores(legacy, reviews),
         "reviews": [_review_out(review) for review in reviews],
     }
+
+
+def _legacy_view(code):
+    """Adapt a function-1 code to the shape the derived analytics expect."""
+    return {
+        "label": code["code"],
+        "phrase": code["code"],
+        "quote_text": code["quote"],
+        "literal_meaning": code.get("literal_meaning", ""),
+        # participant_label keys the joins (unique per reviewer); the name is
+        # what every surface displays
+        "participant_label": code.get("reviewer_id") or code["participant"],
+        "reviewer": code["participant"],
+        "review_id": code["review_id"],
+        "rating": code.get("rating"),
+        "months_ago": code.get("months_ago"),
+        "bucket": code.get("bucket"),
+        "emotion": code.get("emotion", "neutral"),
+        "intent": code.get("intent", ""),
+        "valence": code.get("valence", 0.0),
+        "confidence": code.get("confidence", 0.7),
+        "sentiment": code.get("sentiment", "neutral"),
+        "is_negative_case": 1 if code.get("negative_case") else 0,
+        "theme_name": (code.get("themes") or [None])[0],
+        "alternative_interpretations": [],
+        "stems": [],
+    }
+
+
+def sentiment_over_time(reviews, periods=8):
+    """Mean sentiment per period, oldest to newest.
+
+    Star ratings move in whole numbers and hide drift; this tracks the coded
+    sentiment of what people actually wrote, which turns before the rating does.
+    """
+    dated = [review for review in reviews if review.get("months_ago") is not None]
+    if len(dated) < 3:
+        return {"points": [], "note": "Too few dated reviews to plot a trend."}
+
+    span = max(review["months_ago"] for review in dated)
+    span = max(span, 1.0)
+    count = max(2, min(periods, len(dated) // 2))
+    width = span / count
+
+    points = []
+    for index in range(count):
+        # index 0 is the oldest band, so the chart reads left to right in time
+        high = span - index * width
+        low = span - (index + 1) * width
+        if index == count - 1:
+            low = -0.001
+        members = [review for review in dated
+                   if low < review["months_ago"] <= high]
+        if not members:
+            continue
+        scores = [review.get("sentiment_score", 0.0) for review in members]
+        ratings = [review["rating"] for review in members
+                   if review.get("rating") is not None]
+        mean = sum(scores) / len(scores)
+        points.append({
+            "label": _band_label(low, high),
+            "months_ago_from": round(max(low, 0), 1),
+            "months_ago_to": round(high, 1),
+            "reviews": len(members),
+            "mean_sentiment": round(mean, 3),
+            "sentiment": sentiment_label(mean),
+            "positive": sum(1 for r in members if r.get("sentiment") == "positive"),
+            "negative": sum(1 for r in members if r.get("sentiment") == "negative"),
+            "average_rating": round(sum(ratings) / len(ratings), 2) if ratings else None,
+        })
+
+    note = "Not enough movement to call a direction."
+    if len(points) >= 2:
+        # Compare the oldest and newest thirds rather than single bands: one
+        # five-star review in the oldest band should not read as a collapse.
+        third = max(1, len(points) // 3)
+        oldest = points[:third]
+        newest = points[-third:]
+        start = sum(p["mean_sentiment"] * p["reviews"] for p in oldest) / \
+            max(sum(p["reviews"] for p in oldest), 1)
+        end = sum(p["mean_sentiment"] * p["reviews"] for p in newest) / \
+            max(sum(p["reviews"] for p in newest), 1)
+        change = end - start
+        if change <= -0.15:
+            note = ("Sentiment has fallen " + str(round(abs(change), 2))
+                    + " points from the oldest period to the most recent. The written "
+                      "reviews turned before the star average did.")
+        elif change >= 0.15:
+            note = ("Sentiment has risen " + str(round(change, 2))
+                    + " points from the oldest period to the most recent. Whatever "
+                      "changed is working.")
+        else:
+            note = ("Sentiment is broadly flat across the period (moved "
+                    + str(round(change, 2)) + "). The issues in this report are "
+                    "structural rather than a recent slip.")
+    return {"points": points, "note": note}
+
+
+def _band_label(low, high):
+    low = max(low, 0)
+    if high <= 1.5:
+        return "this month"
+    if low < 0.6:
+        return "0-" + str(int(round(high))) + " mo"
+    return str(int(round(low))) + "-" + str(int(round(high))) + " mo"
+
+
+def theme_contradictions(codes, themes, reviews):
+    """Tensions inside a theme, and star ratings that fight the words."""
+    out = []
+    by_theme = defaultdict(list)
+    for code in codes:
+        for name in code.get("themes") or []:
+            by_theme[name].append(code)
+
+    for theme in themes:
+        members = by_theme.get(theme["theme"], [])
+        positives = [code for code in members if code["valence"] >= 0.25]
+        negatives = [code for code in members if code["valence"] <= -0.25]
+        if not positives or not negatives:
+            continue
+        best = max(positives, key=lambda code: code["valence"])
+        worst = min(negatives, key=lambda code: code["valence"])
+        if best["participant"] == worst["participant"]:
+            kind, weight = "within-case", 0.45
+        else:
+            kind, weight = "cross-case", 0.7
+        severity = min(1.0, weight + abs(best["valence"] - worst["valence"]) * 0.25)
+        out.append({
+            "theme": theme["theme"],
+            "severity": _severity(severity),
+            "severity_score": round(severity, 3),
+            "kind": kind,
+            "description": (
+                best["participant"] + " reports \"" + tp.truncate(best["quote"], 150)
+                + "\" while " + worst["participant"] + " reports \""
+                + tp.truncate(worst["quote"], 150)
+                + "\" — the same theme holds both, so an average across it hides "
+                  "the split."),
+        })
+
+    by_review = defaultdict(list)
+    for code in codes:
+        by_review[code["review_id"]].append(code)
+    for review in reviews:
+        members = by_review.get(review["id"], [])
+        if not members or review.get("rating") is None:
+            continue
+        mean = sum(code["valence"] for code in members) / len(members)
+        rating = float(review["rating"])
+        if rating >= 4 and mean <= -0.2:
+            worst = min(members, key=lambda code: code["valence"])
+            score = min(1.0, (rating - 3) / 2 + abs(mean))
+            out.append({
+                "theme": (worst.get("themes") or ["Rating vs text"])[0],
+                "severity": _severity(score), "severity_score": round(score, 3),
+                "kind": "rating-vs-text",
+                "description": (
+                    review["reviewer"] + " left " + str(int(rating))
+                    + " stars while describing a clear problem: \""
+                    + tp.truncate(worst["quote"], 180)
+                    + "\" The score flatters the experience; a star average hides it."),
+            })
+        elif rating <= 2 and mean >= 0.2:
+            best = max(members, key=lambda code: code["valence"])
+            out.append({
+                "theme": (best.get("themes") or ["Rating vs text"])[0],
+                "severity": 1, "severity_score": 0.35, "kind": "rating-vs-text",
+                "description": (
+                    review["reviewer"] + " left " + str(int(rating))
+                    + " stars but the text is largely positive: \""
+                    + tp.truncate(best["quote"], 160)
+                    + "\" One specific failure is dragging the whole score down."),
+            })
+
+    out.sort(key=lambda item: -item["severity_score"])
+    return out[:30]
 
 
 def _theme_out(theme):

@@ -322,6 +322,7 @@ MIGRATIONS = [
     ("transcripts", "doc_group", "TEXT"),
     ("transcripts", "comment", "TEXT"),
     ("themes", "color", "TEXT NOT NULL DEFAULT '#2B4570'"),
+    ("reviews", "side_label", "TEXT"),
 ]
 
 

@@ -48,6 +48,100 @@ CATEGORY_PLAYBOOK = {
 }
 
 
+def compare_many(primary, competitors):
+    """Benchmark against any number of competitors.
+
+    Each rival is scored on the same dimensions, and the adoption parameters are
+    drawn from whichever competitor is strongest on each dimension — the point
+    of adding a third and fourth rival is to learn from the best of each, not to
+    average them into a composite that nobody actually is.
+    """
+    competitors = [rival for rival in competitors if rival]
+    if not competitors:
+        return None
+
+    head_to_head = [compare(primary, rival) for rival in competitors]
+    dimensions = [entry["dimension"] for entry in primary["dimensions"]]
+    by_dimension = {entry["dimension"]: entry for entry in primary["dimensions"]}
+
+    matrix = []
+    leaders = {}
+    for dimension in dimensions:
+        yours = by_dimension[dimension]["score"]
+        row = {"dimension": dimension, "primary": yours, "competitors": []}
+        best_score, best_label = yours, None
+        for rival in competitors:
+            score = next((entry["score"] for entry in rival["dimensions"]
+                          if entry["dimension"] == dimension), 5.5)
+            row["competitors"].append({"label": rival["label"], "score": score})
+            if score > best_score:
+                best_score, best_label = score, rival["label"]
+        row["best"] = best_label or primary["label"]
+        row["gap_to_best"] = round(yours - best_score, 2)
+        matrix.append(row)
+        if best_label:
+            leaders[dimension] = (best_label, best_score)
+
+    adoption = []
+    for single in head_to_head:
+        for item in single["adoption_parameters"]:
+            leader = leaders.get(item["parameter"])
+            if leader and leader[0] != single["competitor_label"]:
+                continue        # only learn a dimension from whoever leads it
+            adoption.append({**item, "from": single["competitor_label"]})
+    seen = set()
+    unique = []
+    for item in sorted(adoption, key=lambda entry: -abs(entry["gap"])):
+        if item["parameter"] in seen:
+            continue
+        seen.add(item["parameter"])
+        unique.append(item)
+
+    ranked = sorted(
+        [{"label": primary["label"], "nss": primary["kpis"]["net_sentiment_score"],
+          "rating": primary["kpis"]["average_rating"], "is_you": True}]
+        + [{"label": rival["label"], "nss": rival["kpis"]["net_sentiment_score"],
+            "rating": rival["kpis"]["average_rating"], "is_you": False}
+           for rival in competitors],
+        key=lambda entry: -entry["nss"])
+
+    return {
+        "primary_label": primary["label"],
+        "competitor_label": competitors[0]["label"],
+        "competitor_labels": [rival["label"] for rival in competitors],
+        "radar": head_to_head[0]["radar"],
+        "matrix": matrix,
+        "ranking": ranked,
+        "headline": _multi_headline(primary, competitors, ranked, matrix),
+        "kpi_delta": head_to_head[0]["kpi_delta"],
+        "adoption_parameters": unique[:8],
+        "defend": [{"dimension": row["dimension"], "lead": -row["gap_to_best"]}
+                   for row in matrix if row["gap_to_best"] > 0.6],
+        "head_to_head": head_to_head,
+    }
+
+
+def _multi_headline(primary, competitors, ranked, matrix):
+    position = next(index for index, entry in enumerate(ranked, start=1)
+                    if entry["is_you"])
+    behind = [row["dimension"] for row in matrix if row["gap_to_best"] <= -0.6]
+    ahead = [row["dimension"] for row in matrix if row["gap_to_best"] >= 0.6]
+    parts = ["You rank " + _ordinal(position) + " of " + str(len(ranked))
+             + " on net sentiment."]
+    if behind:
+        parts.append("You trail the best performer on "
+                     + ", ".join(behind[:3]) + ".")
+    if ahead:
+        parts.append("You lead on " + ", ".join(ahead[:2]) + ".")
+    return " ".join(parts)
+
+
+def _ordinal(number):
+    if 10 <= number % 100 <= 20:
+        return str(number) + "th"
+    return str(number) + {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+
+
 def compare(primary, competitor):
     if not competitor:
         return None

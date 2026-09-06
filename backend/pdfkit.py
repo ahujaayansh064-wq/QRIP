@@ -440,6 +440,40 @@ def grouped_bars(doc, x, y, width, height, groups, series, gap=10):
         legend_x += text_width(name, 7.8) + 30
 
 
+def line_chart(doc, x, y, width, height, points, labels, low=-1.0, high=1.0,
+               colour="#2B4570", zero_line=True):
+    """A single series across evenly spaced periods, oldest on the left."""
+    if len(points) < 2:
+        doc.text(x, y + height / 2, "Not enough dated reviews to plot a trend.",
+                 size=8.5, colour="#6B6D76")
+        return
+    span = (high - low) or 1.0
+
+    def plot_y(value):
+        return y + (max(low, min(high, value)) - low) / span * height
+
+    for step in range(5):
+        level = y + height * step / 4
+        doc.line(x, level, x + width, level, colour="#EDEBE4", width=0.5)
+        doc.text(x - 26, level - 3, "%+.1f" % (low + span * step / 4), size=6.8,
+                 colour="#6B6D76", align="right", width=22)
+    if zero_line and low < 0 < high:
+        doc.line(x, plot_y(0), x + width, plot_y(0), colour="#C9C5B8", width=0.9)
+
+    step_x = width / max(len(points) - 1, 1)
+    coordinates = [(x + index * step_x, plot_y(value))
+                   for index, value in enumerate(points)]
+    for index in range(len(coordinates) - 1):
+        start = coordinates[index]
+        end = coordinates[index + 1]
+        doc.line(start[0], start[1], end[0], end[1], colour=colour, width=1.8)
+    for index, point in enumerate(coordinates):
+        doc.circle(point[0], point[1], 2.6, fill=colour)
+        if index < len(labels):
+            doc.text(point[0] - step_x / 2, y - 11, labels[index], size=6.8,
+                     colour="#6B6D76", align="center", width=step_x)
+
+
 def radar(doc, cx, cy, radius, axes, series, rings=5, maximum=10.0):
     """axes: [label]. series: [(name, colour, [scores...])]"""
     count = max(len(axes), 3)

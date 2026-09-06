@@ -43,14 +43,24 @@ def parse_relative_time(text, now=None):
         return stamp.isoformat(timespec="seconds"), round(1 / 30.44, 3)
     match = _REL_RE.search(lowered)
     if not match:
-        # already a date?
-        for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"):
+        # A unix timestamp, as Outscraper's review_timestamp column gives.
+        if re.fullmatch(r"\d{9,11}(\.\d+)?", lowered):
+            parsed = datetime.fromtimestamp(float(lowered), timezone.utc)
+            days = (now - parsed).days
+            return parsed.isoformat(timespec="seconds"), round(max(days, 0) / 30.44, 2)
+        # An absolute date. Day-first before month-first: Outscraper writes
+        # DD/MM/YYYY, and 03/08 is a real date under both readings, so order
+        # decides it rather than an error.
+        raw = str(text).split("+")[0].strip()[:19]
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
+                        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y",
+                        "%d-%m-%Y", "%B %d, %Y", "%d %B %Y"):
             try:
-                parsed = datetime.strptime(str(text)[:19], pattern).replace(tzinfo=timezone.utc)
-                days = (now - parsed).days
-                return parsed.isoformat(timespec="seconds"), round(max(days, 0) / 30.44, 2)
+                parsed = datetime.strptime(raw, pattern).replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
+            days = (now - parsed).days
+            return parsed.isoformat(timespec="seconds"), round(max(days, 0) / 30.44, 2)
         return None, None
     count_word = (match.group(1) or "1").lower()
     count = 1.0 if count_word in ("a", "an", "one") else float(count_word)
@@ -249,9 +259,19 @@ def _from_outscraper(identifiers, limit):
 
 _STAR_LINE = re.compile(r"^\s*(\d(?:\.\d)?)\s*(?:/\s*5)?\s*(?:stars?)?\s*[|,\-–]\s*", re.I)
 
+# The block paste format:
+#     *(Review 002)*
+#     *Kiaria Dental clinic (a month ago)*
+#
+#     "Quoted opening line." Rest of the review...
+_REVIEW_MARKER = re.compile(r"^[*_\s]*\(?\s*Review\s*[#:]?\s*(\d+)\s*\)?[*_\s]*$",
+                            re.IGNORECASE | re.MULTILINE)
+_ATTRIBUTION = re.compile(r"^[*_\s]*(?P<name>[^*_()\n]{1,80}?)\s*"
+                          r"\((?P<when>[^)\n]{1,40})\)[*_\s]*$", re.MULTILINE)
+
 
 def parse_manual(text):
-    """Accept JSON, CSV or plain blocks. Forgiving on purpose."""
+    """Accept JSON, CSV, the block format, or plain lines. Forgiving on purpose."""
     raw = (text or "").strip()
     if not raw:
         return []
@@ -261,7 +281,171 @@ def parse_manual(text):
     if "," in first_line and any(word in first_line for word in
                                  ("rating", "review", "star", "text", "comment")):
         return _from_csv(raw)
+    blocks = parse_blocks(raw)
+    if blocks:
+        return blocks
     return _from_blocks(raw)
+
+
+def parse_blocks(raw):
+    """Parse the '(Review N)' + '*Name (time)*' + body format.
+
+    Returns [] when the text plainly is not in this shape, so the caller can
+    fall back to the simpler formats.
+    """
+    markers = list(_REVIEW_MARKER.finditer(raw))
+    chunks = []
+    if len(markers) >= 1:
+        for index, marker in enumerate(markers):
+            end = markers[index + 1].start() if index + 1 < len(markers) else len(raw)
+            chunks.append((marker.group(1), raw[marker.end():end]))
+    else:
+        # No "(Review N)" markers: split on the attribution lines themselves.
+        attributions = [m for m in _ATTRIBUTION.finditer(raw)
+                        if _looks_like_attribution(m)]
+        if len(attributions) < 2:
+            return []
+        for index, match in enumerate(attributions):
+            end = (attributions[index + 1].start() if index + 1 < len(attributions)
+                   else len(raw))
+            chunks.append((str(index + 1), raw[match.start():end]))
+
+    out = []
+    for number, chunk in chunks:
+        reviewer, when, body = _split_chunk(chunk)
+        body = _clean_body(body)
+        if len(body.split()) < 3:
+            continue
+        out.append({
+            "reviewer": reviewer or ("Review " + str(number)),
+            "rating": None,
+            "text": body,
+            "relative_time": when,
+            "published_at": None,
+            "owner_response": None,
+            "photo_count": 0,
+        })
+    return out
+
+
+def _looks_like_attribution(match):
+    """An attribution line is a short name plus a time in brackets, alone on a line."""
+    name = match.group("name").strip()
+    when = match.group("when").strip().lower()
+    if not name or len(name.split()) > 8:
+        return False
+    return bool(_REL_RE.search(when)) or when in ("just now", "today", "yesterday")
+
+
+def _split_chunk(chunk):
+    """Pull the reviewer and relative time off the front of one review block."""
+    reviewer, when = None, None
+    lines = chunk.split("\n")
+    body_start = 0
+    for index, line in enumerate(lines[:4]):
+        if not line.strip():
+            body_start = max(body_start, index + 1)
+            continue
+        match = _ATTRIBUTION.match(line)
+        if match and _looks_like_attribution(match):
+            reviewer = match.group("name").strip(" *_-–—")
+            when = match.group("when").strip()
+            body_start = index + 1
+            break
+        # a bare "*Name*" line with the date on the next line
+        bare = re.match(r"^[*_\s]*([^*_\n]{1,60}?)[*_\s]*$", line)
+        if bare and index == 0 and not reviewer and len(bare.group(1).split()) <= 6:
+            candidate = bare.group(1).strip()
+            if candidate and not _REL_RE.search(candidate.lower()):
+                reviewer = candidate
+                body_start = index + 1
+    return reviewer, when, "\n".join(lines[body_start:])
+
+
+def _clean_body(body):
+    """Tidy the review text without dropping any of the participant's words."""
+    text = body.strip()
+    text = re.sub(r"^[*_\s]+", "", text)
+    text = re.sub(r"[*_\s]+$", "", text)
+    # Reviews pasted from a document often wrap the opening sentence in quotes;
+    # the quotes are formatting, not something the reviewer said.
+    text = re.sub(r'^[""“”]([^"""“”]{10,}?)[""“”]\s*', r"\1 ", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+# --- Outscraper spreadsheet -----------------------------------------------
+
+OUTSCRAPER_COLUMNS = {
+    "reviewer": ("author_title", "author_name", "reviewer_name", "author"),
+    "rating": ("review_rating", "rating", "stars"),
+    "text": ("review_text", "review", "text", "snippet"),
+    "when": ("review_datetime_utc", "review_timestamp", "date", "review_date"),
+    "owner_response": ("owner_answer", "response_from_owner_text", "owner_response"),
+    "photos": ("review_img_urls", "review_photo_ids", "review_img_url"),
+    "business": ("name", "business_name", "title", "query"),
+}
+
+
+def _pick(record, keys):
+    for key in keys:
+        value = record.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def parse_outscraper_rows(records):
+    """Map Outscraper's review export (Excel or CSV rows) to review records."""
+    business = None
+    out = []
+    for record in records:
+        text = str(_pick(record, OUTSCRAPER_COLUMNS["text"]) or "").strip()
+        if not text:
+            continue
+        business = business or _pick(record, OUTSCRAPER_COLUMNS["business"])
+        photos = _pick(record, OUTSCRAPER_COLUMNS["photos"]) or ""
+        out.append({
+            "reviewer": str(_pick(record, OUTSCRAPER_COLUMNS["reviewer"])
+                            or "Anonymous").strip(),
+            "rating": _pick(record, OUTSCRAPER_COLUMNS["rating"]),
+            "text": _strip_html(text),
+            "relative_time": None,
+            "published_at": _pick(record, OUTSCRAPER_COLUMNS["when"]),
+            "owner_response": _strip_html(str(
+                _pick(record, OUTSCRAPER_COLUMNS["owner_response"]) or "")) or None,
+            "photo_count": len([p for p in str(photos).split(",") if p.strip()]),
+        })
+    return str(business or "").strip() or None, out
+
+
+def parse_outscraper_file(data, filename=""):
+    """Read an uploaded Outscraper export (.xlsx or .csv)."""
+    if (filename or "").lower().endswith(".csv"):
+        text = data.decode("utf-8-sig", "replace") if isinstance(data, bytes) else data
+        records = list(csv.DictReader(io.StringIO(text)))
+    else:
+        import xlsxreader
+        records = xlsxreader.read_records(data)
+    if not records:
+        raise ValueError("That spreadsheet has no rows.")
+    business, reviews = parse_outscraper_rows(records)
+    if not reviews:
+        raise ValueError(
+            "No review text found. An Outscraper reviews export has a "
+            "'review_text' column — check you exported reviews rather than places.")
+    return business, reviews
+
+
+_TAG_RE = re.compile(r"<[^>]{1,40}>")
+
+
+def _strip_html(text):
+    if not text:
+        return ""
+    cleaned = _TAG_RE.sub(" ", str(text).replace("<br>", "\n").replace("<br/>", "\n"))
+    return re.sub(r"[ \t]+", " ", cleaned).strip()
 
 
 def _from_json(raw):

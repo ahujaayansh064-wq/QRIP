@@ -36,6 +36,7 @@ def build(report):
 
     cover(doc, report)
     section_dashboard(doc, primary, report)
+    section_themes(doc, primary)
     section_temporal(doc, primary)
     section_bottlenecks(doc, primary)
     section_framework(doc, primary)
@@ -157,8 +158,47 @@ def key_findings(primary, report):
 
 # --- 2. temporal ----------------------------------------------------------
 
+def section_themes(doc, primary):
+    """The thematic framework — function 2's reasoning, with its evidence."""
+    themes = primary.get("themes") or []
+    if not themes:
+        return
+    doc.heading("2  Thematic framework", size=14, rule=True)
+    engine = (primary.get("engine") or {}).get("reasoning")
+    doc.paragraph(
+        "Every coded statement was sorted into the theme it belongs to by meaning, "
+        "not by shared words. Coverage is the share of reviewers whose reviews "
+        "support the theme."
+        + ("" if engine == "claude" else
+           " This run used the local fallback engine, so treat the groupings as "
+           "provisional."),
+        colour=FAINT, size=8.6)
+
+    for theme in themes:
+        doc.ensure(120)
+        doc.text(doc.margin, doc.y - 11, theme["theme"], size=11.5, font="F2")
+        doc.text(doc.margin, doc.y - 11,
+                 str(theme.get("evidence_count", 0)) + " statements · "
+                 + str(len(theme.get("participants", []))) + " reviewers · "
+                 + str(int(round(theme.get("coverage", 0) * 100))) + "% coverage",
+                 size=7.8, colour=FAINT, align="right", width=doc.content_width)
+        doc.y -= 18
+        colour = SENTIMENT_COLOURS.get(theme.get("sentiment", "neutral"), AMBER)
+        pdfkit.bar_row(doc, doc.margin, doc.y, doc.content_width,
+                       theme.get("coverage", 0), 1.0, colour)
+        doc.y -= 14
+        if theme.get("description"):
+            doc.paragraph(theme["description"], size=8.8, leading=12, gap=4)
+        for quote in (theme.get("quotes") or [])[:2]:
+            stars = (str(int(quote["rating"])) + "* " if quote.get("rating") else "")
+            doc.quote(quote["text"], stars + quote.get("reviewer", ""))
+        if theme.get("alternative_interpretation"):
+            doc.paragraph("Alternative reading: " + theme["alternative_interpretation"],
+                          size=8.4, leading=11.5, colour=FAINT, gap=8)
+
+
 def section_temporal(doc, primary):
-    doc.heading("2  Temporal and sentiment trend distribution", size=14, rule=True)
+    doc.heading("3  Temporal and sentiment trend distribution", size=14, rule=True)
     series = primary["temporal"]["series"]
     if not series:
         doc.paragraph("No dated reviews were available, so no trend can be shown.",
@@ -188,11 +228,30 @@ def section_temporal(doc, primary):
                "Negative share"], rows, [150, 70, 70, 70, 70, 80, 90],
               align=["left", "right", "right", "right", "right", "right", "right"])
 
+    trend = primary.get("sentiment_trend") or {}
+    if trend.get("points"):
+        doc.heading("How sentiment has moved", size=11.5, gap_before=8)
+        doc.paragraph(
+            "Coded sentiment of what reviewers actually wrote, oldest period on the "
+            "left. Star ratings move in whole numbers and lag; the language turns "
+            "first.", colour=FAINT, size=8.6)
+        doc.ensure(150)
+        top = doc.y - 132
+        doc.rect(doc.margin, top, doc.content_width, 132, fill="#FFFFFF",
+                 stroke="#E4E1D8", radius=4)
+        pdfkit.line_chart(
+            doc, doc.margin + 40, top + 30, doc.content_width - 70, 78,
+            [point["mean_sentiment"] for point in trend["points"]],
+            [point["label"] for point in trend["points"]],
+            low=-1.0, high=1.0, colour=LEDGER)
+        doc.y = top - 12
+        doc.paragraph(trend.get("note", ""), size=8.8)
+
 
 # --- 3. bottlenecks and contradictions ------------------------------------
 
 def section_bottlenecks(doc, primary):
-    doc.heading("3  Operational bottleneck audit", size=14, rule=True)
+    doc.heading("4  Operational bottleneck audit", size=14, rule=True)
     bottlenecks = primary["bottlenecks"]
     if not bottlenecks:
         doc.paragraph("No sustained negative pattern was found in this corpus.",
@@ -248,7 +307,7 @@ def section_bottlenecks(doc, primary):
 # --- 4. framework matrix --------------------------------------------------
 
 def section_framework(doc, primary):
-    doc.heading("4  Framework matrix: the customer journey", size=14, rule=True)
+    doc.heading("5  Framework matrix: the customer journey", size=14, rule=True)
     framework = primary["framework"]
     doc.paragraph("The corpus indexed against the six stages of the customer journey. "
                   "Coverage is the share of reviewers who speak to that stage at all; "
@@ -277,7 +336,7 @@ def section_framework(doc, primary):
 
 def section_competitor(doc, primary, competitor, comparison):
     doc.new_page()
-    doc.heading("5  Competitor cross-comparison", size=14, rule=True, gap_before=0)
+    doc.heading("6  Competitor cross-comparison", size=14, rule=True, gap_before=0)
     doc.paragraph(comparison["headline"])
 
     doc.ensure(300)
