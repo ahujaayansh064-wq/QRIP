@@ -17,9 +17,16 @@ import io
 import json
 import os
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+
+# Outscraper scrapes on demand, so a hundred reviews is minutes of work, not
+# seconds. Poll for up to this long before telling the user to use the file tab.
+OUTSCRAPER_WAIT = 300.0
+OUTSCRAPER_BASE = "https://api.app.outscraper.com"
 
 UNIT_DAYS = {
     "minute": 1 / 1440, "hour": 1 / 24, "day": 1.0, "week": 7.0,
@@ -86,14 +93,50 @@ BUCKETS = ["0-3 months", "3-6 months", "6-12 months", "12+ months", "unknown"]
 
 # --- Google Maps URLs -----------------------------------------------------
 
+# Google's own shorteners. Share -> Copy link hands out one of these, and it
+# carries no identifiers at all until it is followed.
+SHORT_HOSTS = ("maps.app.goo.gl", "goo.gl", "g.co", "maps.google.com/url")
+
+
+def is_short_link(url):
+    host = urllib.parse.urlparse(url or "").netloc.lower()
+    return host in ("maps.app.goo.gl", "goo.gl", "g.co")
+
+
+def expand_short_link(url, timeout=15):
+    """Follow a Google share link to the real /maps/place/ URL.
+
+    Only Google's own shorteners are followed, so this cannot be pointed at an
+    arbitrary host by a pasted link. Returns the original URL unchanged if it
+    is not a short link or cannot be resolved.
+    """
+    if not is_short_link(url):
+        return url
+    try:
+        request = urllib.request.Request(url, method="GET", headers={
+            "User-Agent": "Mozilla/5.0 (compatible; QRIP review importer)"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            resolved = response.geturl()
+    except Exception:
+        return url
+    return resolved or url
+
+
 def parse_maps_url(url):
     """Pull whatever identifiers a Google Maps URL carries.
 
-    Handles /maps/place/<name>/@lat,lng,..., ?cid=, place_id=, and the
-    !1s0x...:0x... feature id found in share links.
+    Handles /maps/place/<name>/@lat,lng,..., ?cid=, place_id=, the
+    !1s0x...:0x... feature id, and maps.app.goo.gl share links, which are
+    followed first because on their own they carry nothing.
     """
     if not url:
         return {}
+    if is_short_link(url):
+        expanded = expand_short_link(url)
+        if expanded and expanded != url:
+            out = parse_maps_url(expanded)
+            out["short_url"] = url
+            return out
     out = {"url": url}
     parsed = urllib.parse.urlparse(url)
     query = urllib.parse.parse_qs(parsed.query)
@@ -129,10 +172,36 @@ def provider_status():
     }
 
 
+_PROVIDER_HINTS = {
+    401: "the API key was rejected — check the value saved on the server",
+    402: "the provider says the account is out of credits",
+    403: "the API key is not permitted to make that call",
+    404: "the provider has nothing at that address",
+    422: "the provider rejected the request, usually an unusable Maps URL",
+    429: "the provider is rate limiting — wait a minute and try again",
+}
+
+
 def _get_json(url, headers=None, timeout=25):
+    """GET JSON, turning transport and provider errors into readable messages.
+
+    Without this an expired key or an exhausted account surfaces as an
+    unhandled HTTPError and the job dies with a 500 and no explanation.
+    """
     request = urllib.request.Request(url, headers=headers or {})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8", "replace"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        hint = _PROVIDER_HINTS.get(exc.code, "the provider returned HTTP "
+                                             + str(exc.code))
+        raise ValueError("Review provider error: " + hint + ".") from None
+    except urllib.error.URLError as exc:
+        raise ValueError("Could not reach the review provider: "
+                         + str(exc.reason) + ".") from None
+    except json.JSONDecodeError:
+        raise ValueError("The review provider returned something that is not "
+                         "JSON.") from None
 
 
 def fetch_from_url(url, limit=200):
@@ -232,27 +301,97 @@ def _from_serpapi(identifiers, limit):
     return {"name": name, "reviews": out[:limit], "meta": {}}
 
 
+def outscraper_place(payload):
+    """Dig the place object out of an Outscraper response.
+
+    The synchronous call answers {"data": [place]} while the async results
+    endpoint answers {"data": [[place]]}, so unwrap defensively rather than
+    indexing once and hoping.
+    """
+    node = payload.get("data") if isinstance(payload, dict) else payload
+    for _ in range(3):
+        if isinstance(node, list):
+            if not node:
+                return {}
+            node = node[0]
+        else:
+            break
+    return node if isinstance(node, dict) else {}
+
+
+def outscraper_reviews(place):
+    """Map one Outscraper place object to review records.
+
+    Same field names as the .xlsx export, so a URL run and a file upload
+    produce identical records downstream.
+    """
+    out = []
+    for review in place.get("reviews_data") or []:
+        text = _strip_html(str(review.get("review_text") or "")).strip()
+        if not text:
+            continue
+        out.append({
+            "reviewer": str(review.get("author_title") or "Anonymous").strip(),
+            "rating": review.get("review_rating"),
+            "text": text,
+            "relative_time": None,
+            "published_at": review.get("review_datetime_utc"),
+            "owner_response": _strip_html(
+                str(review.get("owner_answer") or "")).strip() or None,
+            "photo_count": len(review.get("review_photos") or []),
+        })
+    return out
+
+
+def _outscraper_poll(location, headers, wait=None, sleeper=time.sleep,
+                     clock=time.monotonic):
+    """Poll an async job until it finishes, backing off as it goes."""
+    limit = OUTSCRAPER_WAIT if wait is None else wait
+    deadline = clock() + limit
+    delay = 3.0
+    while True:
+        payload = _get_json(location, headers=headers, timeout=60)
+        status = str(payload.get("status") or "").strip().lower()
+        if status in ("success", "finished", "completed", "ok"):
+            return payload
+        if status in ("error", "failed", "cancelled"):
+            raise ValueError("Outscraper could not read that place: "
+                             + str(payload.get("error") or "the job failed") + ".")
+        if clock() >= deadline:
+            raise ValueError(
+                "Outscraper is still working after "
+                + str(int(limit // 60)) + " minutes. Very large places can take "
+                "longer than that — export the reviews on Outscraper's site and "
+                "use the file upload tab instead.")
+        sleeper(delay)
+        delay = min(delay * 1.5, 15.0)
+
+
 def _from_outscraper(identifiers, limit):
     key = os.environ["OUTSCRAPER_KEY"]
     query = identifiers.get("place_id") or identifiers.get("url")
+    headers = {"X-API-KEY": key}
+    # async, because Outscraper scrapes on demand: a hundred reviews takes far
+    # longer than any sensible HTTP timeout.
     params = urllib.parse.urlencode({
-        "query": query, "reviewsLimit": limit, "limit": 1, "async": "false"})
-    payload = _get_json("https://api.app.outscraper.com/maps/reviews-v3?" + params,
-                        headers={"X-API-KEY": key})
-    data = (payload.get("data") or [{}])[0]
-    out = []
-    for review in data.get("reviews_data") or []:
-        out.append({
-            "reviewer": review.get("author_title") or "Anonymous",
-            "rating": review.get("review_rating"),
-            "text": review.get("review_text") or "",
-            "relative_time": review.get("review_datetime_utc"),
-            "published_at": review.get("review_datetime_utc"),
-            "owner_response": review.get("owner_answer"),
-            "photo_count": len(review.get("review_photos") or []),
-        })
-    return {"name": data.get("name") or identifiers.get("name"), "reviews": out,
-            "meta": {"rating": data.get("rating"), "review_count": data.get("reviews")}}
+        "query": query, "reviewsLimit": limit, "limit": 1, "async": "true"})
+    payload = _get_json(OUTSCRAPER_BASE + "/maps/reviews-v3?" + params,
+                        headers=headers, timeout=60)
+    location = payload.get("results_location")
+    if location:
+        payload = _outscraper_poll(location, headers)
+
+    place = outscraper_place(payload)
+    reviews = outscraper_reviews(place)
+    if not reviews:
+        raise ValueError(
+            "Outscraper returned no reviews for that URL. Check the link opens "
+            "the business page on Google Maps, and that the place actually has "
+            "written reviews rather than bare star ratings.")
+    return {"name": place.get("name") or identifiers.get("name"),
+            "reviews": reviews[:limit],
+            "meta": {"rating": place.get("rating"),
+                     "review_count": place.get("reviews")}}
 
 
 # --- manual entry ---------------------------------------------------------

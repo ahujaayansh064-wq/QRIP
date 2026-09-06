@@ -1,11 +1,14 @@
-"""Run every suite against a running server.
+"""Run every suite.
 
-    python backend/server.py --demo      # in one terminal
-    python tests/run_all.py              # in another
+    python tests/run_all.py
 
-The suites assert against the --demo seed (the demo account and the referral
-project), so the server must have been started with that flag. Set
-QRIP_TEST_BASE to point at a different host.
+urlpath_test runs offline with mocked providers and needs nothing. The other
+three drive a live server and assert against the --demo seed, so start one
+first:
+
+    python backend/server.py --demo
+
+Set QRIP_TEST_BASE to point at a different host.
 """
 import json
 import os
@@ -14,10 +17,16 @@ import sys
 import urllib.error
 import urllib.request
 
+HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.environ.get("QRIP_TEST_BASE", "http://127.0.0.1:8000")
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SUITES = ["api_test.py", "caqdas_test.py", "reviews_test.py"]
+OFFLINE = ["urlpath_test.py"]
+SERVER = ["api_test.py", "caqdas_test.py", "reviews_test.py"]
+
+
+def run(suite):
+    print("\n=== " + suite + " " + "=" * max(2, 60 - len(suite)))
+    return subprocess.call([sys.executable, os.path.join(HERE, suite)])
 
 
 def preflight():
@@ -30,28 +39,30 @@ def preflight():
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=10) as response:
             json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        print("\nNo demo account at " + BASE + " (login returned "
+              + str(exc.code) + ").")
+        print("The server suites need the seed data. Restart with:")
+        print("    python backend/server.py --demo")
+        return False
     except urllib.error.URLError as exc:
-        if isinstance(exc, urllib.error.HTTPError):
-            print("No demo account at " + BASE + " (login returned "
-                  + str(exc.code) + ").")
-            print("The suites need the seed data. Restart the server with:")
-            print("    python backend/server.py --demo")
-        else:
-            print("No server responding at " + BASE + ": " + str(exc.reason))
-            print("Start one with:  python backend/server.py --demo")
+        print("\nNo server responding at " + BASE + ": " + str(exc.reason))
+        print("Start one with:  python backend/server.py --demo")
         return False
     return True
 
 
 def main():
+    failed = [suite for suite in OFFLINE if run(suite) != 0]
+
     if not preflight():
-        return 2
-    failed = []
-    for suite in SUITES:
-        print("\n=== " + suite + " " + "=" * (60 - len(suite)))
-        code = subprocess.call([sys.executable, os.path.join(HERE, suite)])
-        if code != 0:
+        print("\nSkipped the server suites.")
+        return 1 if failed else 2
+
+    for suite in SERVER:
+        if run(suite) != 0:
             failed.append(suite)
+
     print("\n" + "=" * 66)
     if failed:
         print("FAILED: " + ", ".join(failed))

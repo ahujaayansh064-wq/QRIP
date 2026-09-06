@@ -128,7 +128,7 @@ and a sentiment-over-time line chart.
 |---|---|
 | Paste | The block format: `*(Review 001)*` / `*Anitha Reddy (2 weeks ago)*` / text. Plain lines, CSV and JSON also work. |
 | Outscraper file | Upload an Outscraper `.xlsx` or `.csv` export. Reads `author_title`, `review_text`, `review_rating`, `review_datetime_utc` and `owner_answer`. |
-| Google Maps URL | Needs `OUTSCRAPER_KEY`, `SERPAPI_KEY` or `GOOGLE_MAPS_API_KEY`. |
+| Google Maps URL | Needs `OUTSCRAPER_KEY`, `SERPAPI_KEY` or `GOOGLE_MAPS_API_KEY`. Share links (`maps.app.goo.gl/…`) are followed to the real place URL first. Outscraper runs async with polling, because scraping a hundred reviews takes minutes. |
 | One at a time | A form, for a handful you have in front of you. |
 | Demo | The bundled sample dataset. |
 
@@ -181,8 +181,8 @@ caps how many segments are sent.
 
 ## Tests
 
-120 end-to-end checks against a running server — no test framework, no
-dependencies.
+147 checks — no test framework, no dependencies. `urlpath_test.py` (27) runs
+offline with mocked providers; the other three drive a live server.
 
 ```bash
 python backend/server.py --demo    # one terminal
@@ -195,7 +195,10 @@ project. The runner checks for it and says so rather than failing obscurely.
 `api_test.py` (37) covers auth, projects, documents, analysis and exports;
 `caqdas_test.py` (29) the manual workbench — quotations, codebook, memos,
 networks, queries, agreement; `reviews_test.py` (54) the three review functions,
-all five ingestion modes, multi-competitor comparison and the three downloads.
+all five ingestion modes, multi-competitor comparison and the three downloads;
+`urlpath_test.py` (27) the Maps URL path — URL parsing, short-link expansion,
+Outscraper response shapes, async polling and every provider error — with the
+network mocked, so it needs no key and spends nothing.
 Point `QRIP_TEST_BASE` at another host to run them against a deployment.
 
 ## Layout
