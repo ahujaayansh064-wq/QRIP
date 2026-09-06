@@ -177,11 +177,29 @@ the usage ledger. Any failure leaves the local coding in place, so an analysis
 never half-completes. `QRIP_LLM=off` forces the local engine; `QRIP_LLM_MAX_UNITS`
 caps how many segments are sent.
 
+## Tests
+
+120 end-to-end checks against a running server — no test framework, no
+dependencies.
+
+```bash
+python backend/server.py --demo    # one terminal
+python tests/run_all.py            # another
+```
+
+`api_test.py` (37) covers auth, projects, documents, analysis and exports;
+`caqdas_test.py` (29) the manual workbench — quotations, codebook, memos,
+networks, queries, agreement; `reviews_test.py` (54) the three review functions,
+all five ingestion modes, multi-competitor comparison and the three downloads.
+Point `QRIP_TEST_BASE` at another host to run them against a deployment.
+
 ## Layout
 
 ```
 backend/
   server.py            HTTP server: /api/* plus the static frontend
+  claude.py            shared Claude client: structured output, fallbacks
+  xlsxreader.py        stdlib .xlsx reader (Outscraper imports)
   api.py               route handlers (78 routes)
   caqdas.py            quotations, codebook, groups, memos, links, queries, agreement
   db.py                SQLite schema, migrations and helpers
@@ -189,6 +207,10 @@ backend/
   exports.py           xlsx / docx / pdf writers (stdlib only)
   pdfkit.py            vector PDF: flowed text, tables, donut/bar/radar charts
   reviews/
+    thematic.py        function 1: Claude codes every review
+    reasoning.py       function 2: Claude Opus 5 sorts codes into themes
+    codebook.py        the function-1 codebook workbook
+    scoring.py         sentiment cuts, text/star blend
     sources.py         Maps URL parsing, providers, manual/CSV/JSON parsing, demo data
     lexicon.py         review vocabulary: categories, radar dimensions, journey stages
     analysis.py        coding -> KPIs, trend, bottlenecks, content counts, framework
@@ -210,6 +232,8 @@ frontend/              zero-build SPA (vanilla ES modules + hand-written CSS)
   js/views/landing.js  the public page
   js/views/workbench.js  the coding surface
   js/views/reviews.js  the review intelligence tool
+  js/views/reviewinput.js  the five ways reviews get in
+tests/                 120 end-to-end checks
 samples/               six sample interview transcripts
 data/                  SQLite database and uploads (created on first run)
 ```
