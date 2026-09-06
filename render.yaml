@@ -5,8 +5,9 @@ services:
     name: qrip
     runtime: python
     plan: free
-    # Nothing to install — the app is standard library only.
-    buildCommand: "python --version"
+    # QRIP itself is standard library only; this installs the Anthropic SDK
+    # that functions 1 and 2 use for coding and theme reasoning.
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python backend/server.py"
     healthCheckPath: /api/health
     envVars:
@@ -46,10 +47,13 @@ services:
       # - key: OUTSCRAPER_KEY
       #   sync: false
 
-      # Optional: Claude for the interpretive layer. Also change buildCommand
-      # above to "pip install anthropic".
-      # - key: ANTHROPIC_API_KEY
-      #   sync: false
+      # REQUIRED for the quality this tool is built for. Functions 1 and 2
+      # (review coding and theme reasoning) use Claude Opus 5. Without this
+      # key they fall back to a lexicon that matches words rather than
+      # meaning. `sync: false` means Render prompts you for the value on
+      # deploy rather than storing it in this file.
+      - key: ANTHROPIC_API_KEY
+        sync: false
 
     # Paid instances only — see the note above.
     # disk:

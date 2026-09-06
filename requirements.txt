@@ -1,0 +1,5 @@
+# QRIP's own code is standard library only. The single dependency here is the
+# Anthropic SDK, which functions 1 and 2 use for coding and theme reasoning.
+# Without it the app still runs, but falls back to the local lexicon engine
+# that matches words rather than meaning.
+anthropic>=0.40

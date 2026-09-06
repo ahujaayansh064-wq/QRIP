@@ -5,7 +5,9 @@ quotations, a code manager, memos, networks, queries, inter-coder agreement —
 plus an automatic first pass that does the mechanical coding in seconds and
 hands you every object to argue with.
 
-Everything runs locally. No Node, no npm, no pip install, no API key.
+Everything runs locally. No Node, no npm, no build step. The only dependency
+is the Anthropic SDK (`requirements.txt`), used by the review tool's coding
+and reasoning passes; the rest of the app is standard library.
 
 ## Run it
 
@@ -186,6 +188,9 @@ dependencies.
 python backend/server.py --demo    # one terminal
 python tests/run_all.py            # another
 ```
+
+The `--demo` flag matters: the suites assert against the seeded account and
+project. The runner checks for it and says so rather than failing obscurely.
 
 `api_test.py` (37) covers auth, projects, documents, analysis and exports;
 `caqdas_test.py` (29) the manual workbench — quotations, codebook, memos,
