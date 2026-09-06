@@ -11,11 +11,13 @@ import io
 
 import auth
 import caqdas
+import claude as claude_client
 import db
 import exports
 from analysis import pipeline
 from analysis import clustering as cl
 from analysis import textproc as tp
+from reviews import codebook as review_codebook
 from reviews import jobs as review_jobs
 from reviews import report_pdf as review_pdf
 from reviews import sources as review_sources
@@ -1226,6 +1228,63 @@ def review_providers(ctx):
     }
 
 
+def parse_upload(ctx):
+    """Read an uploaded Outscraper export and hand back the reviews it holds."""
+    require_user(ctx)
+    files = ctx.get("files") or {}
+    if "file" not in files:
+        raise ApiError(400, "No file was uploaded.")
+    filename, raw = files["file"]
+    try:
+        business, reviews = review_sources.parse_outscraper_file(raw, filename)
+    except ValueError as exc:
+        raise ApiError(400, str(exc))
+    except Exception:
+        raise ApiError(400, "That file could not be read as a spreadsheet. Export "
+                            "the reviews from Outscraper as .xlsx or .csv.")
+    normalised = review_sources.normalise(reviews)
+    return {
+        "business_name": business,
+        "count": len(normalised),
+        "reviewers": sorted({row["reviewer"] for row in normalised})[:8],
+        "dated": sum(1 for row in normalised if row["months_ago"] is not None),
+        "reviews": [{
+            "reviewer": row["reviewer"], "rating": row["rating"], "text": row["text"],
+            "relative_time": row["relative_time"], "published_at": row["published_at"],
+            "owner_response": row["owner_response"],
+            "photo_count": row["photo_count"],
+        } for row in normalised],
+    }
+
+
+def job_codebook(ctx, job_id):
+    """The function-1 codebook: Themes, Codes, Quotations, Confidence, Audit."""
+    row, report = _require_report(ctx, job_id)
+    primary = report["primary"]
+    data = review_codebook.build(
+        primary.get("codebook") or [], primary.get("themes") or [],
+        primary.get("contradictions") or [],
+        meta={"job_id": job_id, "engine": primary.get("engine"),
+              "reviews": primary["kpis"]["total_reviews"]})
+    return FileResponse(
+        data, "QRIP_codebook_" + _safe_name(row["business_name"]) + ".xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def engine_status(ctx):
+    require_user(ctx)
+    state = claude_client.status()
+    providers = review_sources.provider_status()
+    return {
+        "reasoning": state,
+        "providers": providers,
+        "any_provider": any(providers.values()),
+        "note": ("Functions 1 and 2 read context with Claude when "
+                 "ANTHROPIC_API_KEY is set. Without it they fall back to a "
+                 "lexicon that matches words rather than meaning."),
+    }
+
+
 def analyze(ctx):
     user = require_user(ctx)
     try:
@@ -1379,6 +1438,9 @@ ROUTES = [
     ("GET", r"^/projects/([^/]+)/agreement$", agreement_route),
 
     ("POST", r"^/analyze$", analyze),
+    ("POST", r"^/reviews/parse-upload$", parse_upload),
+    ("GET", r"^/reviews/engine$", engine_status),
+    ("GET", r"^/report/([^/]+)/codebook$", job_codebook),
     ("GET", r"^/jobs$", list_jobs),
     ("GET", r"^/review-providers$", review_providers),
     ("GET", r"^/report/([^/]+)$", job_report),

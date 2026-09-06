@@ -7,12 +7,15 @@ import { barChart, donutChart, groupedBars, heatmap, radarChart } from "../chart
 import {
   badge, empty, field, h, header, link, navigate, num, pct, toast, when,
 } from "../ui.js";
+import { createSource } from "./reviewinput.js";
 
 const LEDGER = "#2B4570";
 const GREEN = "#2F6F4E";
 const AMBER = "#8A6D3B";
 const RED = "#B5541B";
 const SENTIMENT_COLOUR = { positive: GREEN, neutral: AMBER, negative: RED };
+const OPEN_Q = "\u201c";
+const CLOSE_Q = "\u201d";
 
 const PASTE_HINT =
   "One review per line or per paragraph. Optionally lead with the star rating and "
@@ -38,8 +41,8 @@ export async function reviewsView(jobId) {
 // --- start screen ---------------------------------------------------------
 
 async function openStart(body) {
-  const [providers, jobs] = await Promise.all([
-    api.get("/review-providers").catch(() => ({ providers: {}, any: false, note: "" })),
+  const [engine, jobs] = await Promise.all([
+    api.get("/reviews/engine").catch(() => ({ reasoning: {}, providers: {} })),
     api.get("/jobs").catch(() => []),
   ]);
 
@@ -54,139 +57,65 @@ async function openStart(body) {
                      + "confidence and an alternative reading — then rolled up into an "
                      + "executive report with charts, an operational bottleneck audit "
                      + "and a competitor comparison." })),
-    inputPanel(providers),
+    inputPanel(engine),
     jobsPanel(jobs));
 }
 
-function inputPanel(providers) {
-  const state = { mode: "paste", rows: [] };
-  const businessName = h("input", { class: "input", placeholder: "e.g. Riverside Dental Studio" });
-  const competitorName = h("input", { class: "input", placeholder: "Optional" });
-  const businessUrl = h("input", { class: "input",
-    placeholder: "https://www.google.com/maps/place/..." });
-  const competitorUrl = h("input", { class: "input", placeholder: "Optional" });
-  const businessPaste = h("textarea", { class: "textarea", rows: "9",
-    placeholder: "Paste the reviews for your business here" });
-  const competitorPaste = h("textarea", { class: "textarea", rows: "6",
-    placeholder: "Optional — paste a competitor's reviews to unlock the comparison" });
+function inputPanel(engine) {
+  const primary = createSource({ nameLabel: "Your business", rows: "10" });
+  const competitors = [];
+  const competitorList = h("div", { class: "space-y-4" });
   const status = h("p", { class: "text-sm text-warn" });
   const submit = h("button", { class: "btn btn-primary btn-lg", type: "submit" },
-                   "Generate report");
+                   "Run analysis");
 
-  const tabs = h("div", { class: "tabs mb-5" });
-  const panel = h("div");
-
-  const rowsList = h("div", { class: "space-y-2 mb-3" });
-  const rowRating = h("select", { class: "select", style: "width:7rem" },
-    h("option", { value: "" }, "Stars"),
-    ...[5, 4, 3, 2, 1].map((value) => h("option", { value: String(value) }, value + " ★")));
-  const rowReviewer = h("input", { class: "input", placeholder: "Reviewer (optional)" });
-  const rowWhen = h("input", { class: "input", placeholder: "e.g. 3 months ago" });
-  const rowText = h("textarea", { class: "textarea", rows: "2",
-    placeholder: "What did they say?" });
-
-  function drawRows() {
-    rowsList.replaceChildren(...state.rows.map((row, index) => h("div", {
-      class: "card p-3 flex items-start justify-between gap-3" },
-      h("div", null,
-        h("div", { class: "flex items-center gap-2 mb-1" },
-          row.rating ? h("span", { class: "badge badge-review", text: row.rating + " ★" }) : null,
-          h("span", { class: "text-sm font-medium", text: row.reviewer || "Anonymous" }),
-          row.relative_time
-            ? h("span", { class: "text-xs text-inkfaint", text: row.relative_time }) : null),
-        h("p", { class: "text-sm text-inkfaint", text: row.text })),
-      h("button", { class: "btn btn-sm btn-danger", onClick: () => {
-        state.rows.splice(index, 1);
-        drawRows();
-      } }, "Remove"))));
-    if (!state.rows.length) {
-      rowsList.replaceChildren(h("p", { class: "text-sm text-inkfaint",
-        text: "No reviews added yet. Fill the fields below and press Add review." }));
+  function drawCompetitors() {
+    competitorList.replaceChildren(...competitors.map((entry, index) => h("div", {
+      class: "card p-4" },
+      h("div", { class: "flex items-center justify-between mb-3" },
+        h("span", { class: "eyebrow", text: "Competitor " + (index + 1) }),
+        h("button", { class: "btn btn-sm btn-danger", type: "button", onClick: () => {
+          competitors.splice(index, 1);
+          drawCompetitors();
+        } }, "Remove")),
+      entry.node)));
+    if (!competitors.length) {
+      competitorList.replaceChildren(h("p", { class: "text-sm text-inkfaint",
+        text: "No competitors yet. Add as many as you like — each one is analysed "
+              + "separately, and every dimension is learned from whichever rival "
+              + "actually leads it." }));
     }
   }
 
-  function setMode(mode) {
-    state.mode = mode;
-    for (const node of tabs.children) {
-      node.className = "tab" + (node.dataset.mode === mode ? " tab-active" : "");
-    }
-    if (mode === "paste") {
-      panel.replaceChildren(
-        field("Your reviews", businessPaste, PASTE_HINT),
-        h("div", { class: "mt-4" },
-          field("Competitor reviews", competitorPaste,
-                "Optional. Adding these turns on the radar comparison and the "
-                + "adoption recommendations.")));
-    } else if (mode === "url") {
-      panel.replaceChildren(
-        providerBanner(providers),
-        h("div", { class: "grid grid-2 gap-4 mt-4" },
-          field("Google Maps URL", businessUrl,
-                "Paste the listing URL — the place id is read out of it."),
-          field("Competitor Maps URL", competitorUrl, "Optional.")));
-    } else if (mode === "form") {
-      panel.replaceChildren(
-        h("p", { class: "text-sm text-inkfaint mb-3",
-                 text: "Add reviews one at a time. Useful for a handful of reviews you "
-                       + "have in front of you, or for reviews from somewhere other "
-                       + "than Google." }),
-        rowsList,
-        h("div", { class: "card p-4" },
-          h("div", { class: "flex gap-3 mb-3 flex-wrap" },
-            h("div", { style: "width:7rem" }, field("Rating", rowRating)),
-            h("div", { class: "flex-1", style: "min-width:12rem" },
-              field("Reviewer", rowReviewer)),
-            h("div", { class: "flex-1", style: "min-width:12rem" },
-              field("When", rowWhen))),
-          field("Review", rowText),
-          h("div", { class: "flex justify-end mt-3" },
-            h("button", { class: "btn btn-sm", type: "button", onClick: () => {
-              if (!rowText.value.trim()) {
-                toast("Type the review text first.", "error");
-                return;
-              }
-              state.rows.push({
-                rating: rowRating.value || null,
-                reviewer: rowReviewer.value.trim() || "Anonymous",
-                relative_time: rowWhen.value.trim() || null,
-                text: rowText.value.trim(),
-              });
-              rowText.value = "";
-              rowReviewer.value = "";
-              drawRows();
-            } }, "Add review"))));
-      drawRows();
-    } else {
-      panel.replaceChildren(h("div", { class: "card p-5" },
-        h("h3", { class: "font-display text-lg mb-2", text: "Demo dataset" }),
-        h("p", { class: "text-sm text-inkfaint",
-                 text: "15 reviews for a dental practice and 10 for a competitor, "
-                       + "written to contain the things this tool looks for: a pricing "
-                       + "surprise, a booking failure, a five-star review full of "
-                       + "complaint, and a competitor who is simply better organised." })));
-    }
+  function addCompetitor() {
+    competitors.push(createSource({
+      nameLabel: "Competitor name", rows: "6",
+      placeholder: "Competitor " + (competitors.length + 1),
+      modes: ["paste", "upload", "url", "form"],
+    }));
+    drawCompetitors();
   }
 
-  for (const [mode, label] of [["paste", "Paste reviews"], ["url", "Google Maps URL"],
-                               ["form", "Add one by one"], ["demo", "Use demo data"]]) {
-    tabs.appendChild(h("button", { class: "tab", dataset: { mode }, type: "button",
-                                   onClick: () => setMode(mode) }, label));
-  }
+  drawCompetitors();
 
   const form = h("form", { class: "card p-6 mb-8", onSubmit: async (event) => {
     event.preventDefault();
     status.textContent = "";
     submit.disabled = true;
     submit.textContent = "Analysing…";
+    const source = primary.payload();
     const payload = {
-      mode: state.mode,
-      business_name: businessName.value.trim(),
-      competitor_name: competitorName.value.trim(),
-      business_url: businessUrl.value.trim(),
-      competitor_url: competitorUrl.value.trim(),
-      business_reviews: businessPaste.value,
-      competitor_reviews: competitorPaste.value,
-      business_review_rows: state.mode === "form" ? state.rows : [],
+      mode: primary.state.mode === "demo" ? "demo"
+        : primary.state.mode === "url" ? "url" : "paste",
+      business_name: source.name,
+      business_url: source.url || "",
+      business_reviews: source.reviews || "",
+      business_review_rows: source.rows || [],
+      competitors: competitors.map((entry) => {
+        const value = entry.payload();
+        return { name: value.name, url: value.url || "",
+                 reviews: value.reviews || "", rows: value.rows || [] };
+      }),
     };
     try {
       const job = await api.post("/analyze", payload);
@@ -194,21 +123,44 @@ function inputPanel(providers) {
     } catch (error) {
       status.textContent = error.message;
       submit.disabled = false;
-      submit.textContent = "Generate report";
+      submit.textContent = "Run analysis";
     }
   } },
-    h("div", { class: "grid grid-2 gap-4 mb-5" },
-      field("Business name", businessName),
-      field("Competitor name", competitorName)),
-    tabs,
-    panel,
-    h("div", { class: "flex items-center justify-between mt-5 gap-4 flex-wrap" },
-      status,
-      submit));
+    engineBanner(engine),
+    h("div", { class: "mb-6" }, primary.node),
+    h("div", { class: "flex items-center justify-between mb-3 mt-8" },
+      h("h3", { class: "font-display text-xl", text: "Competitors" }),
+      h("button", { class: "btn btn-sm", type: "button", onClick: addCompetitor },
+        "Add a competitor")),
+    competitorList,
+    h("div", { class: "flex items-center justify-between mt-6 gap-4 flex-wrap" },
+      status, submit));
 
-  setMode("paste");
   return form;
 }
+
+
+function engineBanner(engine) {
+  const reasoning = (engine && engine.reasoning) || {};
+  if (reasoning.available) {
+    return h("div", { class: "card p-4 mb-6",
+      style: "background:var(--confidencelight);border-color:transparent" },
+      h("p", { class: "text-sm text-confidence" },
+        "Reasoning engine: ", h("strong", { text: reasoning.model }),
+        " — reviews are coded and themed by meaning in context."));
+  }
+  return h("div", { class: "card p-4 mb-6",
+    style: "background:var(--warnlight);border-color:transparent" },
+    h("p", { class: "text-sm text-warn mb-1",
+             text: "Claude is not configured, so this run will use the local "
+                   + "lexicon engine." }),
+    h("p", { class: "text-xs", text: reasoning.reason || "" }),
+    h("p", { class: "text-xs mt-2",
+             text: "The lexicon matches words rather than meaning, which is what "
+                   + "produced weak themes previously. Set ANTHROPIC_API_KEY on the "
+                   + "server and pip install anthropic for the intended quality." }));
+}
+
 
 function providerBanner(providers) {
   const configured = Object.entries(providers.providers || {})
@@ -316,6 +268,7 @@ function renderReport(body, job) {
   body.replaceChildren(
     reportHeader(job, report),
     sectionDashboard(primary, report),
+    sectionThemes(primary),
     sectionTemporal(primary),
     sectionBottlenecks(primary),
     sectionFramework(primary),
@@ -353,9 +306,10 @@ function reportHeader(job, report) {
                      + report.meta.source_label
                      + (report.competitor ? " · benchmarked against "
                         + report.competitor.label : "") })),
-    h("div", { class: "flex gap-2" },
+    h("div", { class: "flex gap-2 flex-wrap" },
       download("pdf", "Download PDF report"),
-      download("excel", "Download .xlsx")));
+      download("excel", "Download .xlsx"),
+      download("codebook", "Download codebook")));
 }
 
 // --- 1. dashboard ---------------------------------------------------------
@@ -428,12 +382,125 @@ function kpiTile(value, label, note, accent) {
     h("div", { class: "text-xs text-inkfaint mt-2", text: note }));
 }
 
-// --- 2. temporal ----------------------------------------------------------
+// --- 2. thematic framework -------------------------------------------------
+
+function sectionThemes(primary) {
+  const themes = primary.themes || [];
+  const engine = (primary.engine || {}).reasoning;
+  if (!themes.length) {
+    return section("2", "Thematic framework",
+                   empty("No themes were produced for this corpus."));
+  }
+  const cards = themes.map((theme) => h("div", { class: "card p-5" },
+    h("div", { class: "flex items-start justify-between gap-3 mb-2" },
+      h("h3", { class: "font-display text-xl", text: theme.theme }),
+      badge(theme.status || "candidate")),
+    h("div", { class: "flex gap-4 text-xs text-inkfaint mb-3 tabular" },
+      h("span", { text: (theme.evidence_count || 0) + " statements" }),
+      h("span", { text: (theme.participants || []).length + " reviewers" }),
+      h("span", { text: "coverage " + pct(theme.coverage || 0) }),
+      h("span", { text: "confidence " + Number(theme.confidence || 0).toFixed(2) })),
+    h("div", { class: "meter mb-3" },
+      h("span", { style: "width:" + (theme.coverage || 0) * 100 + "%;background:"
+        + (SENTIMENT_COLOUR[theme.sentiment] || AMBER) })),
+    theme.description
+      ? h("p", { class: "text-sm leading-relaxed mb-3", text: theme.description })
+      : null,
+    ...(theme.quotes || []).slice(0, 2).map((quote) => h("div", { class: "mb-2" },
+      h("p", { class: "quote", text: OPEN_Q + quote.text + CLOSE_Q }),
+      h("p", { class: "text-xs text-inkfaint mt-1",
+               text: (quote.rating ? quote.rating + " stars \u00b7 " : "")
+                     + (quote.reviewer || "") }))),
+    theme.alternative_interpretation
+      ? h("div", { class: "bg-ledgerlight p-3 rounded-card" },
+          h("p", { class: "text-xs uppercase tracking-wide text-ledger mb-1",
+                   text: "Alternative reading" }),
+          h("p", { class: "text-sm", text: theme.alternative_interpretation }))
+      : null));
+
+  return section("2", "Thematic framework",
+    h("p", { class: "text-sm text-inkfaint mb-4",
+             text: engine === "claude"
+               ? "Codes were sorted into themes by meaning rather than shared words, "
+                 + "by Claude Opus 5 reasoning over the whole codebook."
+               : "This run used the local fallback engine, which groups by word "
+                 + "similarity. Treat the groupings as provisional." }),
+    h("div", { class: "grid grid-2 gap-4" }, ...cards));
+}
+
+
+function sentimentTrendCard(primary) {
+  const trend = primary.sentiment_trend || {};
+  const points = trend.points || [];
+  if (points.length < 2) return null;
+  return h("div", { class: "card p-5 mb-4" },
+    h("p", { class: "eyebrow mb-1", text: "How sentiment has moved" }),
+    h("p", { class: "text-sm text-inkfaint mb-3",
+             text: "Coded sentiment of what reviewers wrote, oldest period on the "
+                   + "left. Star ratings move in whole numbers and lag behind." }),
+    lineChart(points.map((point) => point.mean_sentiment),
+              points.map((point) => point.label)),
+    h("p", { class: "text-sm mt-3", text: trend.note || "" }));
+}
+
+
+function lineChart(values, labels) {
+  const width = 720;
+  const height = 190;
+  const left = 34;
+  const plotHeight = height - 34 - 14;
+  const plotWidth = width - left - 14;
+  const parts = [];
+  for (let step = 0; step <= 4; step += 1) {
+    const y = 14 + plotHeight - (plotHeight * step) / 4;
+    const value = (-1 + (2 * step) / 4).toFixed(1);
+    parts.push('<line x1="' + left + '" y1="' + y + '" x2="' + (left + plotWidth)
+      + '" y2="' + y + '" stroke="#EDEBE4"/>');
+    parts.push('<text x="' + (left - 6) + '" y="' + (y + 3)
+      + '" font-size="9" fill="#6B6D76" text-anchor="end">' + value + "</text>");
+  }
+  const zero = 14 + plotHeight / 2;
+  parts.push('<line x1="' + left + '" y1="' + zero + '" x2="' + (left + plotWidth)
+    + '" y2="' + zero + '" stroke="#C9C5B8" stroke-width="1.2"/>');
+
+  const step = plotWidth / Math.max(values.length - 1, 1);
+  const coords = values.map((value, index) => {
+    const clamped = Math.max(-1, Math.min(1, Number(value) || 0));
+    return [left + index * step, 14 + plotHeight - ((clamped + 1) / 2) * plotHeight];
+  });
+  const path = coords.map((point, index) =>
+    (index ? "L" : "M") + point[0].toFixed(1) + " " + point[1].toFixed(1)).join(" ");
+  parts.push('<path d="' + path + '" fill="none" stroke="#2B4570" stroke-width="2.2"'
+    + ' stroke-dasharray="2000" stroke-dashoffset="2000">'
+    + '<animate attributeName="stroke-dashoffset" from="2000" to="0" dur="1.1s"'
+    + ' fill="freeze"/></path>');
+  coords.forEach((point, index) => {
+    parts.push('<circle cx="' + point[0].toFixed(1) + '" cy="' + point[1].toFixed(1)
+      + '" r="4" fill="#2B4570"><title>' + escapeText(labels[index]) + ": "
+      + Number(values[index]).toFixed(2) + "</title></circle>");
+    parts.push('<text x="' + point[0].toFixed(1) + '" y="' + (height - 12)
+      + '" font-size="10" fill="#6B6D76" text-anchor="middle">'
+      + escapeText(labels[index]) + "</text>");
+  });
+  return h("div", { class: "overflow-x-auto", html:
+    '<svg viewBox="0 0 ' + width + " " + height + '" width="100%"'
+    + ' xmlns="http://www.w3.org/2000/svg" style="min-width:520px">'
+    + parts.join("") + "</svg>" });
+}
+
+
+function escapeText(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+
+// --- 3. temporal ----------------------------------------------------------
 
 function sectionTemporal(primary) {
   const series = primary.temporal.series;
   if (!series.length) {
-    return section("2", "Temporal and sentiment trend",
+    return section("3", "Temporal and sentiment trend",
                    empty("No dated reviews, so no trend can be shown."));
   }
   const groups = series.map((entry) => entry.bucket);
@@ -447,7 +514,8 @@ function sectionTemporal(primary) {
               text: entry.average_rating ? entry.average_rating.toFixed(2) : "—" }),
     h("td", { class: "text-right tabular", text: pct(entry.negative_ratio) })));
 
-  return section("2", "Temporal and sentiment trend distribution",
+  return section("3", "Temporal and sentiment trend distribution",
+    sentimentTrendCard(primary),
     h("div", { class: "card p-5 mb-4" },
       groupedBars(groups, [
         { name: "Positive", color: GREEN, values: series.map((entry) => entry.positive) },
@@ -500,7 +568,7 @@ function sectionBottlenecks(primary) {
     h("td", { class: "text-inkfaint", text: item.kind }),
     h("td", { text: item.description })));
 
-  return section("3", "Operational bottleneck audit",
+  return section("4", "Operational bottleneck audit",
     h("p", { class: "text-sm text-inkfaint mb-4",
              text: "Friction ranked by severity: how negative the language is, how many "
                    + "separate reviewers raise it, and how often explicit failure words "
@@ -543,7 +611,7 @@ function sectionFramework(primary) {
     color: LEDGER,
   }));
 
-  return section("4", "Framework matrix: the customer journey",
+  return section("5", "Framework matrix: the customer journey",
     h("div", { class: "grid grid-3 gap-4 mb-6" }, ...stages),
     h("div", { class: "card p-5 overflow-x-auto" },
       h("p", { class: "eyebrow mb-3", text: "Reviewer × journey stage" }),
@@ -579,7 +647,7 @@ function sectionCompetitor(primary, competitor, comparison) {
           h("p", { class: "quote", text: "“" + entry.your_evidence.text + "”" }))
       : null));
 
-  return section("5", "Competitor cross-comparison",
+  return section("6", "Competitor cross-comparison",
     h("p", { class: "text-base leading-relaxed mb-4", text: comparison.headline }),
     h("div", { class: "grid grid-2 gap-4 mb-6" },
       h("div", { class: "card p-5 flex justify-center" },
@@ -607,7 +675,7 @@ function sectionCompetitor(primary, competitor, comparison) {
 
 function sectionEvidence(primary) {
   const categories = primary.content.summary.filter((entry) => entry.mentions > 0);
-  return section("6", "Content counts and coded evidence",
+  return section("7", "Content counts and coded evidence",
     h("div", { class: "grid grid-2 gap-4" },
       h("div", { class: "card p-5" },
         h("p", { class: "eyebrow mb-3", text: "Mentions by category" }),

@@ -94,70 +94,72 @@ the standard library.
 
 ## Review intelligence (`/reviews`)
 
-The same coding engine pointed at customer reviews, producing an executive
-business-intelligence report instead of a research write-up.
+Customer reviews in, executive report out, in three explicit stages.
 
-**Getting reviews in — three ways, no key needed for two of them:**
+### The three functions
+
+**Function 1 — thematic analysis** (`reviews/thematic.py`). Every review is read
+and coded: a short analytic label, the verbatim quote, what it literally says,
+the emotion behind it, the reviewer's intent, a valence from -1 to +1, a
+confidence score, and whether it runs against the tone of its own review. Output
+is the codebook workbook: **Themes, Codes, Quotations, Confidence Scores, Audit
+Log**.
+
+**Function 2 — theme reasoning** (`reviews/reasoning.py`). Claude Opus 5 at
+**medium effort** decides the theme set once across the whole codebook, then
+assigns every code to the theme it belongs to, in batches. This is the pass that
+needs judgement: *"nobody returned my call"*, *"three unanswered emails"* and
+*"the phone just rings"* share no words and are one finding. Coverage,
+participant counts and confidence are computed in code, never asked of the model.
+
+**Function 3 — report generation** (`reviews/report_pdf.py`). The same charts as
+before, with sharper content from function 2, plus a thematic-framework section
+and a sentiment-over-time line chart.
+
+> **Function 1 and 2 both need `ANTHROPIC_API_KEY`.** Without it they fall back to
+> a lexicon that matches words rather than meaning — which is what produced
+> themes like *"Anger and comfortable"*. The UI says plainly which engine ran.
+
+### Getting reviews in
 
 | Mode | What it does |
 |---|---|
-| Paste | JSON, CSV, or plain lines. `5 \| Great staff, seen on time (2 weeks ago)` is understood, as is any CSV with `rating` / `review` / `date` columns. |
-| One at a time | A form for rating, reviewer, age and text — for a handful you have in front of you. |
-| Google Maps URL | Parsed for `place_id` / CID / feature id, then fetched through a configured provider. |
-| Demo | 15 reviews for a dental practice plus 10 for a competitor, to see the whole report immediately. |
+| Paste | The block format: `*(Review 001)*` / `*Anitha Reddy (2 weeks ago)*` / text. Plain lines, CSV and JSON also work. |
+| Outscraper file | Upload an Outscraper `.xlsx` or `.csv` export. Reads `author_title`, `review_text`, `review_rating`, `review_datetime_utc` and `owner_answer`. |
+| Google Maps URL | Needs `OUTSCRAPER_KEY`, `SERPAPI_KEY` or `GOOGLE_MAPS_API_KEY`. |
+| One at a time | A form, for a handful you have in front of you. |
+| Demo | The bundled sample dataset. |
 
-**On scraping.** Direct scraping of maps.google.com is deliberately not
-implemented: it needs a headless browser, breaks constantly against anti-bot
-measures, and is against Google's terms. URLs are served by whichever provider
-is configured:
+**Reviewer names are shown everywhere** — in the codebook, the themes, the
+quotes, the report and the workbook. Internal ids exist only to join rows.
 
-```bash
-set GOOGLE_MAPS_API_KEY=...   # official Places API — legitimate, but max 5 reviews
-set SERPAPI_KEY=...           # full review history, paginated
-set OUTSCRAPER_KEY=...        # full review history
-```
+### Competitors
 
-With none of these set, the URL tab says so plainly and points you at pasting.
+Add **as many competitors as you like**. Each is analysed through the same three
+functions, then compared: a ranking by net sentiment, a dimension matrix showing
+who leads each dimension, and adoption parameters drawn from *whichever rival
+actually leads that dimension* rather than from an average of them.
 
-**What comes out.** An interactive report in the browser and two downloads:
+### Outputs
 
-1. **Executive dashboard** — net sentiment score, reviews analysed, average
-   rating, negative ratio, and a sentiment valence donut.
-2. **Temporal trend** — positive/neutral/negative across 0-3, 3-6, 6-12 and 12+
-   months, with a reading of whether things are getting worse or better.
-3. **Operational bottleneck audit** — friction ranked by severity (how negative
-   the language is, how many separate reviewers raise it, how much explicit
-   failure vocabulary appears), each with supporting quotes; plus a
-   contradictions matrix, including five-star reviews whose text describes a
-   failure.
-4. **Framework matrix** — the customer journey: expectations, experience,
-   barriers, enablers, impact, suggestions for change.
-5. **Competitor cross-comparison** — a radar across Staff & Hospitality, Pricing
-   & Value, Facility Quality & Maintenance, Process & Wait Times and Overall
-   Satisfaction, plus *adoption parameters*: what their customers praise that
-   yours do not, with their words as the evidence.
-
-Exports: a five-plus-section **PDF** with real vector charts (donut, grouped
-bars, radar — drawn by `backend/pdfkit.py`, no chart library), and a **12-sheet
-.xlsx** whose first five sheets are exactly Codebook, Themes, Contradictions,
-Content Counts and Framework Matrix.
-
-**Endpoints:**
+An interactive report in the browser and three downloads: the executive **PDF**
+(vector charts, no chart library), the full **.xlsx** analysis, and the
+**codebook** workbook from function 1.
 
 ```
-POST   /api/analyze                  { mode, business_name, business_url, business_reviews, ... }
-GET    /api/jobs                     list your reports
+POST   /api/analyze                  { mode, business_name, business_reviews, competitors: [...] }
+POST   /api/reviews/parse-upload     multipart Outscraper export -> parsed reviews
+GET    /api/reviews/engine           which reasoning engine and providers are configured
 GET    /api/report/{job_id}          full report JSON
 GET    /api/report/{job_id}/status   progress while it runs
 GET    /api/report/{job_id}/pdf      executive PDF
 GET    /api/report/{job_id}/excel    multi-sheet workbook
-GET    /api/review-providers         which URL providers are configured
+GET    /api/report/{job_id}/codebook function-1 codebook workbook
 ```
 
-Sentiment at review level blends the text reading (65%) with the star rating
-(35%). That is deliberate: it is what lets a five-star review full of complaint
-register as negative and surface in the contradictions matrix instead of
-disappearing into an average.
+Review-level sentiment blends the coded text (65%) with the star rating (35%),
+which is what lets a five-star review full of complaint register as negative and
+surface in the contradictions matrix.
 
 ## Using Claude for the interpretive layer (optional)
 
